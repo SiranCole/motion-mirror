@@ -1,0 +1,13 @@
+{
+  "name": "motion-mirror",
+  "version": "1.0.0",
+  "description": "Espejo con retraso configurable para practicar coreografias, baile o deporte usando la camara del dispositivo.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}

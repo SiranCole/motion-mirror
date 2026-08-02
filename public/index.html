@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<title>MotionMirror</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <header class="topbar">
+    <h1>MotionMirror</h1>
+    <button id="focusToggle" class="btn btn-ghost" type="button" title="Ocultar/mostrar controles">
+      <span id="focusToggleLabel">Modo práctica</span>
+    </button>
+  </header>
+
+  <main class="stage">
+    <div class="video-wrap" id="videoWrap">
+      <video id="liveVideo" playsinline autoplay muted></video>
+      <canvas id="delayCanvas"></canvas>
+
+      <div class="overlay overlay-top">
+        <span id="recIndicator" class="rec-indicator hidden">● REC <span id="recTimer">00:00</span></span>
+      </div>
+
+      <div class="overlay overlay-bottom" id="statsOverlay">
+        <span id="statsText">--</span>
+      </div>
+
+      <div class="overlay overlay-center" id="startOverlay">
+        <button id="startBtn" class="btn btn-primary btn-large" type="button">Activar cámara</button>
+        <p id="startError" class="error-text hidden"></p>
+      </div>
+    </div>
+  </main>
+
+  <aside class="controls" id="controls">
+
+    <section class="panel">
+      <h2>Cámara</h2>
+      <label class="field">
+        <span>Dispositivo</span>
+        <select id="deviceSelect"></select>
+      </label>
+      <label class="field">
+        <span>Resolución</span>
+        <select id="resolutionSelect"></select>
+      </label>
+      <label class="field">
+        <span>Fotogramas por segundo</span>
+        <select id="fpsSelect"></select>
+      </label>
+      <label class="field field-checkbox">
+        <input type="checkbox" id="mirrorToggle" checked />
+        <span>Efecto espejo (solo en pantalla, no afecta grabación)</span>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Modo de vista</h2>
+      <div class="segmented" id="modeSegmented">
+        <button class="seg-btn active" data-mode="live" type="button">En vivo</button>
+        <button class="seg-btn" data-mode="delay" type="button">Con retraso</button>
+      </div>
+
+      <label class="field" id="delayField">
+        <span>Retraso: <strong id="delayValueLabel">5.0 s</strong></span>
+        <input type="range" id="delaySlider" min="0.5" max="10" step="0.1" value="5" />
+        <small id="delayMaxHint" class="hint">calculando máximo posible…</small>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Grabación</h2>
+      <button id="recordBtn" class="btn btn-record" type="button" disabled>Grabar lo que veo</button>
+      <p class="hint">Graba exactamente la vista actual (en vivo o con retraso).</p>
+      <ul id="recordingsList" class="recordings-list"></ul>
+    </section>
+
+    <section class="panel panel-collapsible">
+      <button id="debugToggle" class="btn btn-ghost btn-small" type="button">Mostrar info técnica</button>
+      <div id="debugPanel" class="debug-panel hidden"></div>
+    </section>
+
+  </aside>
+
+  <div id="toast" class="toast hidden"></div>
+
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
