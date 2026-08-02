@@ -1,7 +1,7 @@
 {
   "outputDirectory": "public",
-  "buildCommand": false,
-  "installCommand": false,
+  "buildCommand": null,
+  "installCommand": null,
   "framework": null,
   "headers": [
     {
