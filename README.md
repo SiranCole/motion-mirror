@@ -13,8 +13,8 @@ recordings stay in the browser tab until you download them yourself.
 
 ## Using the deployed version
 
-**Live at:** _(added once deployed)_ — just open it and click "Activar
-cámara". Works on desktop and mobile, no install needed.
+**Live at:** https://motion-mirror-gamma.vercel.app/ — just open it and click
+"Activar cámara". Works on desktop and mobile, no install needed.
 
 ## Running it locally
 
