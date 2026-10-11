@@ -121,9 +121,13 @@ export class CameraController extends EventTarget {
   getResolutionPresets() {
     const caps = this.capabilities;
     if (!caps || !caps.width || !caps.height) return RESOLUTION_PRESETS;
+    // Presets are landscape; phones report capabilities in either
+    // orientation, so compare long side to long side, short to short.
     const maxW = caps.width.max || Infinity;
     const maxH = caps.height.max || Infinity;
-    const filtered = RESOLUTION_PRESETS.filter((p) => p.width <= maxW && p.height <= maxH);
+    const maxLong = Math.max(maxW, maxH);
+    const maxShort = Math.min(maxW, maxH);
+    const filtered = RESOLUTION_PRESETS.filter((p) => p.width <= maxLong && p.height <= maxShort);
     return filtered.length ? filtered : RESOLUTION_PRESETS.slice(-1);
   }
 

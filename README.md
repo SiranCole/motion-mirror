@@ -52,8 +52,19 @@ nothing here depends on a specific version.
   delayed by `n` seconds (adjustable with a slider).
 - **Camera quality controls** — pick the input device, resolution and fps
   from what your camera actually reports supporting.
-- **Recording** — records exactly what's on screen (live or delayed view),
-  saved as a downloadable `.webm`/`.mp4` per take, listed for the session.
+- **Recording (live view only)** — records camera + microphone into a
+  regular MP4 (H.264 + AAC) per take: real duration, instant seeking, plays
+  in any phone gallery or desktop player.
+- **Guardar / Enviar** (`share.js`) — a web page can't write into the
+  gallery or Google Photos directly, so "Guardar" offers the two real routes
+  on phones: download (Android lists it in the gallery's "Download" album) or
+  the OS share sheet (Google Photos "Subir a Fotos"; "Guardar video" on
+  iPhone). On desktop it's a plain download. "Enviar" opens the share sheet
+  with *only* the `video/mp4` file — no title/text — so WhatsApp & co. send
+  it as a playable video rather than as a document.
+- **Built-in player** — full-screen overlay for reviewing takes, works with
+  mouse, keyboard and touch: slow motion (0.25×–2×), ±5 s skip, frame
+  stepping, loop, mirror, fullscreen. Double-tap left/right to skip on touch.
 - **Mirror flip, practice/focus mode** (hides all controls to maximize the
   preview), **screen wake lock** (keeps the screen on while a camera is
   active), and a debug panel with live capture/render fps and buffer memory
@@ -126,19 +137,37 @@ on the first real frame of whichever session first enters delay mode.
 
 ## Recording design
 
-Recording is "what you see is what you get": pressing the record button
-captures whichever stream is currently on screen — the raw camera track
-(live mode) or `canvas.captureStream()` (delayed mode) — via `MediaRecorder`.
-Camera/quality/mode controls are disabled mid-recording since switching the
-source under an active recorder isn't well defined. Recording in delay mode
-is blocked (with a toast) until the delay engine has painted the canvas at
-least once — otherwise a recording started right after entering delay mode,
-or right after a quality change (which resets the buffer), would capture a
-stale or blank canvas. Recordings are kept
-in-memory for the session (blob URLs) with a download link each; nothing is
-written to disk automatically. There is no audio track by design, to avoid
-an extra microphone permission prompt for a feature that wasn't requested —
-easy to add later if needed.
+Recording is only offered in the live view; in delay mode the record
+controls are replaced by a note (the delayed view is for watching yourself
+back, not for capturing).
+
+The output is a **non-fragmented MP4 with the `moov` index at the front**
+(H.264 video, AAC audio) — the same shape a phone camera produces. Plain
+`MediaRecorder` output can't be used directly for that: Chrome/Firefox WebM
+has no duration or cues (unseekable in most players, unplayable in iOS
+Photos), and `MediaRecorder` MP4 is fragmented. So `recorder.js` uses
+[Mediabunny](https://mediabunny.dev) (MPL-2.0, vendored in `public/vendor/`
+so the `script-src 'self'` CSP stays intact; loaded on demand):
+
+- **Primary path:** `MediaStreamVideoTrackSource` / `MediaStreamAudioTrackSource`
+  encode the camera and mic tracks with WebCodecs and mux straight into the
+  MP4 (`fastStart: 'in-memory'`). 1 s keyframe interval so scrubbing is
+  precise. If the browser can't encode AAC natively (e.g. Firefox), a WASM
+  AAC encoder (`@mediabunny/aac-encoder`) is loaded instead.
+- **Fallback** (no WebCodecs H.264/HEVC encoder): `MediaRecorder`, then a
+  Mediabunny remux pass that writes a proper MP4 (or a cued WebM if the
+  codecs don't fit MP4). The original file is kept if that fails, so a take
+  is never lost.
+
+The microphone is requested per take, not at camera start, so using the
+mirror alone never asks for it. Browser audio processing (noise suppression,
+echo cancellation, AGC) is **off by default** because it's tuned for speech
+and mangles music; a checkbox turns it on. If mic access is denied the take
+is recorded video-only, with a toast. The on-screen mirror flip does not
+affect recordings (the player has its own mirror toggle).
+
+Recordings live in memory for the session (blob URLs); nothing is written to
+disk until you download or share one. They are lost on reload.
 
 ## Deployment & security headers
 
@@ -151,8 +180,11 @@ part of what gets deployed.
 camera access: `frame-ancestors 'none'` (Content-Security-Policy) stops the
 page from being embedded in someone else's iframe to trick a visitor into
 granting camera permission they think they're giving to a different site,
-and `Permissions-Policy: camera=(self)` keeps that permission from being
-delegated to embedded content. Since GitHub Pages doesn't support custom
+and `Permissions-Policy: camera=(self), microphone=(self)` keeps those
+permissions from being delegated to embedded content. The CSP also allows
+`'wasm-unsafe-eval'` and `worker-src blob:`, which Mediabunny and its WASM
+AAC encoder need (they spin up inline blob workers); the same policy is
+mirrored in the page's `<meta>` CSP for local serving. Since GitHub Pages doesn't support custom
 response headers, it isn't used for the deploy despite being a free option
 too.
 

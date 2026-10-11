@@ -9,6 +9,21 @@ export function formatMMSS(totalSeconds) {
   return `${mm}:${ss}`;
 }
 
+/**
+ * Player clock: m:ss.t (tenths help when hunting for an exact moment in a
+ * move), widening to h:mm:ss.t only when the media is an hour or longer.
+ */
+export function formatClock(seconds, durationForWidth = seconds) {
+  const t = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const tenths = Math.floor((t % 1) * 10);
+  const whole = Math.floor(t);
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = String(whole % 60).padStart(2, '0');
+  if (durationForWidth >= 3600) return `${h}:${String(m).padStart(2, '0')}:${s}.${tenths}`;
+  return `${m}:${s}.${tenths}`;
+}
+
 export function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -52,6 +67,24 @@ export function computeMaxDelaySeconds(width, height, fps) {
   const maxFrames = Math.max(1, Math.floor(budget / bytesPerFrame));
   const maxSeconds = (maxFrames * DELAY_SAFETY_MARGIN) / Math.max(1, fps);
   return clamp(maxSeconds, 1, 60);
+}
+
+/**
+ * Many Android hardware H.264 encoders (reached through WebCodecs) mishandle
+ * frames whose width/height isn't a multiple of 16 — the output comes out
+ * sheared into diagonal stripes, because the row stride the encoder assumes
+ * doesn't match the buffer's. Phones hit this easily: a portrait 360x640
+ * stream, or 1080-tall video. Encoding at the largest 16-aligned size that
+ * fits (cropping at most 15px off an edge) sidesteps it everywhere.
+ */
+export const ENCODER_ALIGNMENT = 16;
+
+export function alignDown(value, alignment = ENCODER_ALIGNMENT) {
+  return Math.max(alignment, Math.floor(value / alignment) * alignment);
+}
+
+export function isAligned(width, height, alignment = ENCODER_ALIGNMENT) {
+  return width % alignment === 0 && height % alignment === 0;
 }
 
 export function isSecureContextOk() {

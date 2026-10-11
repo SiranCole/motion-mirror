@@ -1,6 +1,8 @@
 import { CameraController } from './camera.js';
 import { DelayEngine } from './delayEngine.js';
 import { RecordingController, fileExtensionFor } from './recorder.js';
+import { Player } from './player.js';
+import { ShareActions } from './share.js';
 import { formatMMSS, formatBytes, isSecureContextOk } from './utils.js';
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +32,11 @@ const delayValueLabel = $('delayValueLabel');
 const delayMaxHint = $('delayMaxHint');
 
 const recordBtn = $('recordBtn');
+const recordControls = $('recordControls');
+const recordUnavailable = $('recordUnavailable');
+const audioProcessingToggle = $('audioProcessingToggle');
 const recordingsList = $('recordingsList');
+const recordingsEmpty = $('recordingsEmpty');
 
 const debugToggle = $('debugToggle');
 const debugPanel = $('debugPanel');
@@ -41,6 +47,8 @@ const focusToggleLabel = $('focusToggleLabel');
 const camera = new CameraController(liveVideo);
 const delayEngine = new DelayEngine(liveVideo, delayCanvas);
 const recorder = new RecordingController();
+const shareActions = new ShareActions($('sheet'), showToast);
+const player = new Player($('player'), shareActions);
 
 let currentMode = 'live';
 let wakeLockSentinel = null;
@@ -71,7 +79,9 @@ async function startCamera() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Este navegador no soporta acceso a la cámara.');
     }
+    console.info('[MotionMirror] requesting camera');
     await camera.init();
+    console.info('[MotionMirror] camera ready', JSON.stringify(camera.settings));
     startOverlay.classList.add('hidden');
     recordBtn.disabled = false;
     videoWrap.classList.toggle('mirrored', mirrorToggle.checked);
@@ -86,6 +96,7 @@ async function startCamera() {
     // the "activate camera" moment, instead of on the first frame after they
     // switch to delay mode.
     delayEngine.prewarm().catch((err) => console.warn('[MotionMirror] prewarm failed', err));
+    recorder.preload().catch((err) => console.warn('[MotionMirror] recorder preload failed', err));
   } catch (err) {
     startError.textContent = describeError(err);
     startError.classList.remove('hidden');
@@ -105,6 +116,7 @@ camera.addEventListener('trackended', () => {
   startOverlay.classList.remove('hidden');
   startBtn.disabled = false;
   recordBtn.disabled = true;
+  recorder.stop();
   delayEngine.stop();
 });
 
@@ -134,7 +146,10 @@ function populateQualitySelects() {
     opt.value = JSON.stringify([p.width, p.height]);
     opt.textContent = p.label;
     resolutionSelect.appendChild(opt);
-    const diff = Math.abs((p.width || 0) - (settings.width || 0));
+    // Presets are landscape but phones stream portrait (e.g. 720x1280), so
+    // match on the long side; comparing width alone picked 360p there.
+    const currentLong = Math.max(settings.width || 0, settings.height || 0);
+    const diff = Math.abs((p.width || 0) - currentLong);
     if (diff < bestResDiff) { bestResDiff = diff; bestResIdx = i; }
   });
   resolutionSelect.selectedIndex = bestResIdx;
@@ -222,6 +237,11 @@ modeButtons.forEach((btn) => {
 });
 
 function applyMode() {
+  // Recording is a live-view feature only: the delayed view is for watching
+  // yourself back, so a take recorded from it would just be the same footage
+  // shifted in time.
+  recordControls.classList.toggle('hidden', currentMode !== 'live');
+  recordUnavailable.classList.toggle('hidden', currentMode === 'live');
   if (currentMode === 'live') {
     liveVideo.classList.remove('hidden');
     delayCanvas.classList.add('hidden');
@@ -242,96 +262,182 @@ delaySlider.addEventListener('input', () => {
 
 // ---------- Recording ----------
 
-recordBtn.addEventListener('click', () => {
+const RECORD_LABEL = 'Grabar video y audio';
+
+recordBtn.addEventListener('click', async () => {
   if (recorder.isRecording) {
     recorder.stop();
     return;
   }
+  if (recorder.isBusy || currentMode !== 'live' || !camera.track) return;
 
-  if (currentMode === 'delay' && !delayEngine.hasRenderedFrame) {
-    showToast('Espera unos segundos: el retraso todavía está llenando su buffer.');
-    return;
-  }
+  recordBtn.disabled = true;
+  recordBtn.textContent = 'Preparando…';
+  setControlsDisabled(true);
 
-  let stream;
-  if (currentMode === 'live') {
-    if (!camera.track) return;
-    stream = new MediaStream([camera.track.clone()]);
-  } else {
-    stream = delayCanvas.captureStream(30);
-  }
-
+  const audioTrack = await acquireMicrophone();
+  const fps = (camera.settings && camera.settings.frameRate) || 30;
   try {
-    recorder.start(stream, {
-      mode: currentMode,
-      delay: currentMode === 'delay' ? Number(delaySlider.value) : 0,
+    await recorder.start({
+      videoTrack: camera.track.clone(),
+      audioTrack,
+      meta: { fps },
     });
   } catch (err) {
-    showToast(describeError(err));
-    return;
+    console.error('[MotionMirror] recording failed to start', err);
+    showToast(`No se pudo iniciar la grabación: ${describeError(err)}`);
+    resetRecordUi();
   }
+});
 
+/**
+ * Microphone is requested per take (not at camera start) so practicing with
+ * the mirror alone never needs the extra permission or leaves the mic
+ * indicator on. Browser processing is off by default because noise
+ * suppression / echo cancellation / AGC are tuned for speech and audibly
+ * mangle music, which is what most practice sessions have playing.
+ */
+async function acquireMicrophone() {
+  const processing = audioProcessingToggle.checked;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: processing,
+        noiseSuppression: processing,
+        autoGainControl: processing,
+      },
+    });
+    return stream.getAudioTracks()[0] || null;
+  } catch (err) {
+    const reason = err && err.name === 'NotAllowedError'
+      ? 'permiso de micrófono denegado'
+      : 'no se pudo acceder al micrófono';
+    showToast(`Grabando solo video (${reason}).`, 5000);
+    return null;
+  }
+}
+
+recorder.addEventListener('start', () => {
+  recordBtn.disabled = false;
   recordBtn.textContent = 'Detener grabación';
   recordBtn.classList.add('recording');
   recIndicator.classList.remove('hidden');
-  setControlsDisabled(true);
   recordStartedAt = performance.now();
+  recTimer.textContent = '00:00';
   recordTimerInterval = setInterval(() => {
     recTimer.textContent = formatMMSS((performance.now() - recordStartedAt) / 1000);
   }, 250);
 });
 
-recorder.addEventListener('recording', (e) => {
-  addRecordingToList(e.detail);
-  recordBtn.textContent = 'Grabar lo que veo';
+recorder.addEventListener('processing', () => {
+  recordBtn.disabled = true;
+  recordBtn.textContent = 'Guardando video…';
   recordBtn.classList.remove('recording');
   recIndicator.classList.add('hidden');
-  setControlsDisabled(false);
   clearInterval(recordTimerInterval);
-  recTimer.textContent = '00:00';
 });
+
+recorder.addEventListener('recording', (e) => {
+  addRecordingToList(e.detail);
+  resetRecordUi();
+  showToast('Grabación guardada. Tócala en la lista para verla.', 2500);
+});
+
+recorder.addEventListener('error', (e) => {
+  console.error('[MotionMirror] recording failed', e.detail);
+  showToast(`La grabación falló: ${describeError(e.detail)}`, 6000);
+  resetRecordUi();
+});
+
+function resetRecordUi() {
+  clearInterval(recordTimerInterval);
+  recordBtn.textContent = RECORD_LABEL;
+  recordBtn.classList.remove('recording');
+  recordBtn.disabled = !camera.track;
+  recIndicator.classList.add('hidden');
+  recTimer.textContent = '00:00';
+  setControlsDisabled(false);
+}
 
 function setControlsDisabled(disabled) {
   deviceSelect.disabled = disabled;
   resolutionSelect.disabled = disabled;
   fpsSelect.disabled = disabled;
+  audioProcessingToggle.disabled = disabled;
   modeButtons.forEach((b) => { b.disabled = disabled; });
 }
 
-function addRecordingToList({ blob, url, durationMs, mimeType, meta }) {
+let takeCounter = 0;
+
+function addRecordingToList({ blob, url, durationMs, mimeType, hasAudio, meta }) {
+  takeCounter += 1;
   const ext = fileExtensionFor(mimeType);
-  const modeLabel = meta.mode === 'delay' ? `retraso-${meta.delay.toFixed(1)}s` : 'vivo';
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const name = `motion-mirror_${modeLabel}_${stamp}.${ext}`;
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+  const name = `motion-mirror_${stamp}.${ext}`;
+  // A File (not just a Blob) is what the Web Share API needs; its video/mp4
+  // type and .mp4 name are what make share targets treat it as a video.
+  const file = new File([blob], name, { type: mimeType, lastModified: now.getTime() });
+  const recording = { name, url, file, fps: meta.fps };
 
   const li = document.createElement('li');
 
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'rec-name';
-  nameSpan.textContent = `${name} · ${formatMMSS(durationMs / 1000)} · ${formatBytes(blob.size)}`;
-  nameSpan.title = name;
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'rec-open';
+  openBtn.title = `Ver ${name}`;
+  const title = document.createElement('span');
+  title.className = 'rec-title';
+  title.textContent = `Toma ${takeCounter} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const details = document.createElement('span');
+  details.className = 'rec-details';
+  details.textContent = `${formatMMSS(durationMs / 1000)} · ${formatBytes(blob.size)} · ${ext.toUpperCase()}${hasAudio ? '' : ' · sin audio'}`;
+  openBtn.append(title, details);
+  openBtn.addEventListener('click', () => player.open(recording));
 
   const actions = document.createElement('div');
   actions.className = 'rec-actions';
 
-  const dl = document.createElement('a');
-  dl.href = url;
-  dl.download = name;
-  dl.className = 'btn btn-small';
-  dl.textContent = 'Descargar';
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'btn btn-small btn-primary';
+  play.textContent = 'Ver';
+  play.addEventListener('click', () => player.open(recording));
+  actions.append(play);
+
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'btn btn-small';
+  save.textContent = 'Guardar';
+  save.addEventListener('click', () => shareActions.save(recording));
+  actions.append(save);
+
+  if (shareActions.canSend(recording)) {
+    const send = document.createElement('button');
+    send.type = 'button';
+    send.className = 'btn btn-small';
+    send.textContent = 'Enviar';
+    send.title = 'Enviar por WhatsApp u otra app';
+    send.addEventListener('click', () => shareActions.send(recording));
+    actions.append(send);
+  }
 
   const del = document.createElement('button');
-  del.className = 'btn btn-small';
+  del.className = 'btn btn-small btn-ghost';
   del.type = 'button';
   del.textContent = 'Eliminar';
   del.addEventListener('click', () => {
+    player.closeIfShowing(url);
     URL.revokeObjectURL(url);
     li.remove();
+    recordingsEmpty.classList.toggle('hidden', recordingsList.children.length > 0);
   });
+  actions.append(del);
 
-  actions.append(dl, del);
-  li.append(nameSpan, actions);
+  li.append(openBtn, actions);
   recordingsList.prepend(li);
+  recordingsEmpty.classList.add('hidden');
 }
 
 // ---------- Focus mode ----------
@@ -374,7 +480,7 @@ function updateStats() {
       );
     }
     lines.push(
-      `Grabación mimeType: ${recorder.mimeType || 'no soportado'}`,
+      `Grabación: ${recorder.backend ? `${recorder.backend === 'webcodecs' ? 'WebCodecs → MP4' : 'MediaRecorder + remux'} (${recorder.codecs})` : 'aún no usada'}`,
       `Wake Lock activo: ${wakeLockSentinel ? 'sí' : 'no'}`,
     );
     debugPanel.textContent = lines.join('\n');

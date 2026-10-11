@@ -15,6 +15,8 @@
  * captured since the last keyframe.
  */
 
+import { alignDown, isAligned } from './utils.js';
+
 const BUFFER_BUDGET_BYTES = 150 * 1024 * 1024; // generous: compressed frames are tiny, this is essentially never the binding constraint
 const SAFETY_MARGIN = 0.7; // same reasoning as the raw engine: never promise a delay that needs the buffer's full capacity, or capture's eviction races render for the same oldest chunk
 const REFERENCE_BYTES_PER_FRAME_1080P = 100 * 1024; // pre-measurement estimate (padded above the ~82KB measured); refined from real output the moment capture starts
@@ -28,6 +30,14 @@ const AVC_LEVELS = [
   { maxMacroblocks: 22080, hex: '32' }, // 5.0 -> covers 2560x1440
   { maxMacroblocks: 36864, hex: '33' }, // 5.1 -> covers 3840x2160
 ];
+
+function makeCanvas(width, height) {
+  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
 
 function avcCodecFor(width, height) {
   const macroblocks = Math.ceil(width / 16) * Math.ceil(height / 16);
@@ -112,9 +122,25 @@ export class WebCodecsDelayEngine {
     }
   }
 
-  _configureCodecs(w, h) {
+  _configureCodecs(srcW, srcH) {
     this._teardownCodecs();
     this.decoderDescription = null;
+
+    // Encode at a 16-aligned size (see alignDown in utils.js); when the
+    // camera's size isn't aligned, frames are center-cropped into a scratch
+    // canvas first instead of being handed to the encoder as-is.
+    const w = alignDown(srcW);
+    const h = alignDown(srcH);
+    this._encodeW = w;
+    this._encodeH = h;
+    this._needsCrop = !isAligned(srcW, srcH);
+    if (this._needsCrop) {
+      this._cropCanvas = makeCanvas(w, h);
+      this._cropCtx = this._cropCanvas.getContext('2d', { alpha: false });
+    } else {
+      this._cropCanvas = null;
+      this._cropCtx = null;
+    }
 
     this.encoder = new VideoEncoder({
       output: (chunk, meta) => this._onEncoded(chunk, meta),
@@ -137,8 +163,19 @@ export class WebCodecsDelayEngine {
     // decoder.configure() happens lazily in _onEncoded, once the first
     // chunk hands us the description bytes an AVC decoder requires.
 
-    this._configuredW = w;
-    this._configuredH = h;
+    this._configuredW = srcW;
+    this._configuredH = srcH;
+  }
+
+  /** A VideoFrame of the current video picture at the encoder's (aligned) size. */
+  _grabFrame(timestamp) {
+    if (!this._needsCrop) return new VideoFrame(this.videoEl, { timestamp });
+    const srcW = this.videoEl.videoWidth;
+    const srcH = this.videoEl.videoHeight;
+    const sx = Math.floor((srcW - this._encodeW) / 2);
+    const sy = Math.floor((srcH - this._encodeH) / 2);
+    this._cropCtx.drawImage(this.videoEl, sx, sy, this._encodeW, this._encodeH, 0, 0, this._encodeW, this._encodeH);
+    return new VideoFrame(this._cropCanvas, { timestamp });
   }
 
   _teardownCodecs() {
@@ -156,7 +193,7 @@ export class WebCodecsDelayEngine {
     if (this.videoEl.readyState < 2) return; // no decoded frame available yet to prime with
     const seq = this._frameSeq++;
     this._primingSeqs.add(seq);
-    const frame = new VideoFrame(this.videoEl, { timestamp: seq });
+    const frame = this._grabFrame(seq);
     try {
       this.encoder.encode(frame, { keyFrame: true });
     } finally {
@@ -169,7 +206,7 @@ export class WebCodecsDelayEngine {
       this.decoderDescription = meta.decoderConfig.description;
       if (this.decoder && this.decoder.state === 'unconfigured') {
         this.decoder.configure({
-          codec: avcCodecFor(this._configuredW, this._configuredH),
+          codec: avcCodecFor(this._encodeW, this._encodeH),
           description: this.decoderDescription,
           optimizeForLatency: true,
         });
@@ -211,8 +248,10 @@ export class WebCodecsDelayEngine {
   }
 
   _syncCanvasSize() {
-    const w = this.videoEl.videoWidth;
-    const h = this.videoEl.videoHeight;
+    // Match what the decoder outputs (the aligned/cropped size), so nothing
+    // gets stretched when it's painted.
+    const w = this._encodeW || this.videoEl.videoWidth;
+    const h = this._encodeH || this.videoEl.videoHeight;
     if (w && h && (this.canvasEl.width !== w || this.canvasEl.height !== h)) {
       this.canvasEl.width = w;
       this.canvasEl.height = h;
@@ -274,7 +313,7 @@ export class WebCodecsDelayEngine {
 
     const seq = this._frameSeq++;
     this._pendingCaptureTimes.set(seq, performance.now());
-    const frame = new VideoFrame(this.videoEl, { timestamp: seq });
+    const frame = this._grabFrame(seq);
     try {
       this.encoder.encode(frame, { keyFrame: true });
     } finally {

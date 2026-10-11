@@ -118,7 +118,44 @@ function safeJoin(base, requestPath) {
   return resolved;
 }
 
+/**
+ * Dev-only: public/js/devlog.js posts uncaught errors and console.error/warn
+ * output from other devices (phones) here, so they show up in this terminal
+ * without needing remote DevTools. This endpoint only exists on the local
+ * server; the static Vercel deploy has no backend, so posts there just 404.
+ */
+function handleDevLog(req, res) {
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 64 * 1024) req.destroy();
+  });
+  req.on('end', () => {
+    try {
+      const { level, message, ua } = JSON.parse(body);
+      console.log(`[device ${req.socket.remoteAddress}] ${level}: ${message}${ua ? `
+    (${ua})` : ''}`);
+    } catch (_) {
+      console.log(`[device ${req.socket.remoteAddress}] ${body.slice(0, 2000)}`);
+    }
+    res.writeHead(204);
+    res.end();
+  });
+}
+
+function logRequest(req) {
+  const addr = req.socket.remoteAddress || '';
+  // Only log other devices; this PC's own requests would just be noise.
+  if (addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1') return;
+  console.log(`[req ${addr}] ${req.method} ${req.url}`);
+}
+
 function serveStatic(req, res) {
+  logRequest(req);
+  if (req.method === 'POST' && req.url === '/__devlog') {
+    handleDevLog(req, res);
+    return;
+  }
   let filePath = safeJoin(PUBLIC_DIR, req.url === '/' ? '/index.html' : req.url);
 
   if (!filePath) {
