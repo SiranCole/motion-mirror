@@ -78,6 +78,18 @@
     <section class="panel">
       <h2>Grabación</h2>
       <div id="recordControls">
+        <div class="mic-status" id="micStatus" data-status="off">
+          <svg class="mic-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>
+          <div class="mic-body">
+            <span class="mic-text" id="micText">Micrófono: se activa junto con la cámara</span>
+            <div class="mic-meter" id="micMeter" aria-hidden="true"><span id="micMeterFill"></span></div>
+          </div>
+          <button id="micConnectBtn" class="btn btn-small btn-primary hidden" type="button">Permitir micrófono</button>
+        </div>
+        <label class="field hidden" id="micDeviceField">
+          <span>Micrófono</span>
+          <select id="micDeviceSelect"></select>
+        </label>
         <button id="recordBtn" class="btn btn-record" type="button" disabled>Grabar video y audio</button>
         <label class="field field-checkbox field-compact">
           <input type="checkbox" id="audioProcessingToggle" />

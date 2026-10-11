@@ -280,6 +280,107 @@ button, select, input { font-family: inherit; }
 .field-compact input { flex: 0 0 auto; width: 18px; height: 18px; margin: 0; }
 .hint-block { font-size: 12px; margin: 0; line-height: 1.5; }
 
+/* ---------- Microphone status + level meter ---------- */
+
+.mic-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: #22252b;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.mic-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--text-dim);
+}
+
+.mic-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mic-text { line-height: 1.35; overflow-wrap: anywhere; }
+
+.mic-meter {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.mic-meter span {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 60ms linear;
+}
+
+.mic-status[data-status="ready"] .mic-icon { color: #22c55e; }
+.mic-status:not([data-status="ready"]) { border-color: #5a4a22; }
+.mic-status:not([data-status="ready"]) .mic-icon { color: #f59e0b; }
+.mic-status[data-status="off"] { border-color: var(--panel-border); }
+.mic-status[data-status="off"] .mic-icon { color: var(--text-dim); }
+.mic-status:not([data-status="ready"]) .mic-meter { display: none; }
+/* Meter not running yet (audio still locked until the next tap): show a
+   neutral track instead of a flat bar that would read as "no sound". */
+.mic-status.meter-idle .mic-meter { opacity: 0.35; }
+
+.mic-status .btn { flex: 0 0 auto; }
+
+.rec-indicator.rec-no-audio::after {
+  content: " · sin micrófono";
+  color: #f59e0b;
+}
+
+/* ---------- Take being processed ---------- */
+
+.recordings-list li.rec-pending { gap: 6px; }
+
+.progress {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.progress span {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.2s ease;
+}
+.progress.indeterminate span {
+  width: 35%;
+  transform: none;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  from { left: -35%; }
+  to { left: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress.indeterminate span { animation: none; left: 0; width: 100%; opacity: 0.5; }
+}
+
 /* ---------- Recordings list ---------- */
 
 .recordings-list {

@@ -32,14 +32,34 @@ export class CameraController extends EventTarget {
     }
   }
 
-  async init() {
+  /**
+   * Opens the default camera. With `audio` constraints, the microphone is
+   * requested in the same getUserMedia call so the user sees a single
+   * permission prompt; its track is handed back (not kept in this.stream,
+   * which stays video-only so camera restarts never touch the mic). If the
+   * combined request fails — mic denied, missing or busy — the camera is
+   * retried alone and the mic failure is returned instead of thrown.
+   *
+   * @returns {Promise<{ audioTrack: MediaStreamTrack|null, audioError: Error|null }>}
+   */
+  async init({ audio = null } = {}) {
+    const video = { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } };
+    let audioTrack = null;
+    let audioError = null;
+    if (audio) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video, audio });
+        audioTrack = stream.getAudioTracks()[0] || null;
+        await this._adoptStream(new MediaStream(stream.getVideoTracks()));
+      } catch (err) {
+        audioError = err;
+      }
+    }
     // A first getUserMedia call is required before enumerateDevices() returns
     // usable labels/deviceIds (privacy restriction until permission is granted).
-    await this._openStream({
-      video: { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
+    if (!this.stream) await this._openStream({ video });
     await this._refreshDeviceList();
-    return this.stream;
+    return { audioTrack, audioError };
   }
 
   async _refreshDeviceList() {
@@ -51,6 +71,11 @@ export class CameraController extends EventTarget {
   async _openStream(constraints) {
     this._stopCurrent();
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    return this._adoptStream(stream);
+  }
+
+  async _adoptStream(stream) {
+    this._stopCurrent();
     this.stream = stream;
     this.track = stream.getVideoTracks()[0];
     this.track.addEventListener('ended', () => {

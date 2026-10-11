@@ -3,6 +3,7 @@ import { DelayEngine } from './delayEngine.js';
 import { RecordingController, fileExtensionFor } from './recorder.js';
 import { Player } from './player.js';
 import { ShareActions } from './share.js';
+import { MicController, micConstraints } from './mic.js';
 import { formatMMSS, formatBytes, isSecureContextOk } from './utils.js';
 
 const $ = (id) => document.getElementById(id);
@@ -35,6 +36,12 @@ const recordBtn = $('recordBtn');
 const recordControls = $('recordControls');
 const recordUnavailable = $('recordUnavailable');
 const audioProcessingToggle = $('audioProcessingToggle');
+const micStatus = $('micStatus');
+const micText = $('micText');
+const micMeterFill = $('micMeterFill');
+const micConnectBtn = $('micConnectBtn');
+const micDeviceField = $('micDeviceField');
+const micDeviceSelect = $('micDeviceSelect');
 const recordingsList = $('recordingsList');
 const recordingsEmpty = $('recordingsEmpty');
 
@@ -47,6 +54,8 @@ const focusToggleLabel = $('focusToggleLabel');
 const camera = new CameraController(liveVideo);
 const delayEngine = new DelayEngine(liveVideo, delayCanvas);
 const recorder = new RecordingController();
+const mic = new MicController();
+mic.processing = audioProcessingToggle.checked;
 const shareActions = new ShareActions($('sheet'), showToast);
 const player = new Player($('player'), shareActions);
 
@@ -70,6 +79,9 @@ function showToast(message, ms = 3500) {
 startBtn.addEventListener('click', startCamera);
 
 async function startCamera() {
+  // Before any await: the mic level meter's AudioContext may only start
+  // inside the tap itself (iOS Safari and autoplay policies).
+  mic.prepareMeter();
   startBtn.disabled = true;
   startError.classList.add('hidden');
   try {
@@ -80,8 +92,16 @@ async function startCamera() {
       throw new Error('Este navegador no soporta acceso a la cámara.');
     }
     console.info('[MotionMirror] requesting camera');
-    await camera.init();
+    // Camera and mic in one getUserMedia call = one permission prompt, and
+    // the mic is confirmed working (live meter) long before the first take.
+    const { audioTrack, audioError } = await camera.init({
+      audio: micConstraints({ processing: mic.processing }),
+    });
     console.info('[MotionMirror] camera ready', JSON.stringify(camera.settings));
+    if (audioTrack) await mic.adopt(audioTrack);
+    else mic.fail(audioError);
+    probeRecorder();
+    if (audioError) console.warn('[MotionMirror] microphone unavailable at start', audioError);
     startOverlay.classList.add('hidden');
     recordBtn.disabled = false;
     videoWrap.classList.toggle('mirrored', mirrorToggle.checked);
@@ -119,6 +139,108 @@ camera.addEventListener('trackended', () => {
   recorder.stop();
   delayEngine.stop();
 });
+
+// ---------- Microphone ----------
+
+const MIC_MESSAGES = {
+  off: 'Micrófono: se activa junto con la cámara',
+  muted: 'El micrófono está silenciado o lo está usando otra app',
+  denied: 'Sin permiso para usar el micrófono',
+  notfound: 'No se encontró ningún micrófono',
+  busy: 'El micrófono está en uso por otra app',
+  error: 'El micrófono se desconectó',
+};
+
+const MIC_BUTTON_LABELS = {
+  off: 'Activar micrófono',
+  muted: 'Reconectar',
+  denied: 'Permitir micrófono',
+  notfound: 'Reintentar',
+  busy: 'Reintentar',
+  error: 'Reconectar',
+};
+
+let micDeniedAttempts = 0;
+
+function renderMic() {
+  const { status } = mic;
+  micStatus.dataset.status = status;
+  if (status === 'ready') {
+    micText.textContent = mic.label ? `Micrófono listo · ${mic.label}` : 'Micrófono listo';
+  } else if (status === 'denied' && micDeniedAttempts > 0) {
+    // Once denied, browsers stop prompting; only the site settings can undo it.
+    micText.textContent = 'Sin permiso de micrófono. Actívalo en los permisos del sitio (el ícono junto a la dirección) y vuelve a intentar.';
+  } else {
+    micText.textContent = MIC_MESSAGES[status] || MIC_MESSAGES.error;
+  }
+  const showButton = status !== 'ready' && !!camera.track;
+  micConnectBtn.classList.toggle('hidden', !showButton);
+  micConnectBtn.textContent = MIC_BUTTON_LABELS[status] || 'Reintentar';
+
+  const current = mic.deviceId;
+  micDeviceSelect.innerHTML = '';
+  mic.devices.forEach((d, i) => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = d.label || `Micrófono ${i + 1}`;
+    if (d.deviceId === current) opt.selected = true;
+    micDeviceSelect.appendChild(opt);
+  });
+  micDeviceField.classList.toggle('hidden', mic.devices.length < 2 || status !== 'ready');
+
+  // A mic that drops mid-take is flagged on the REC badge right away.
+  recIndicator.classList.toggle('rec-no-audio', recorder.isRecording && recordingWithAudio && status !== 'ready');
+}
+
+mic.addEventListener('change', () => {
+  renderMic();
+  if (mic.track !== probedMicTrack) probeRecorder();
+});
+
+// Finds, in the background, a recording format this device's encoders
+// accept with the current camera + mic (see RecordingController.probe), so
+// pressing record just works. Re-run whenever either input changes.
+let probedMicTrack = null;
+function probeRecorder() {
+  if (!camera.track) return;
+  probedMicTrack = mic.track;
+  recorder.probe(camera.track, mic.isReady ? mic.track : null)
+    .catch((err) => console.warn('[MotionMirror] recorder probe failed', err));
+}
+
+async function connectMic(deviceId) {
+  const ok = await mic.connect(deviceId);
+  if (!ok && mic.status === 'denied') micDeniedAttempts += 1;
+  renderMic();
+  return ok;
+}
+
+micConnectBtn.addEventListener('click', async () => {
+  micConnectBtn.disabled = true;
+  await connectMic();
+  micConnectBtn.disabled = false;
+});
+
+micDeviceSelect.addEventListener('change', () => {
+  connectMic(micDeviceSelect.value);
+});
+
+audioProcessingToggle.addEventListener('change', () => {
+  mic.setProcessing(audioProcessingToggle.checked);
+});
+
+// Level meter: only animates while the recording controls are on screen.
+function micMeterLoop() {
+  const visible = !recordControls.classList.contains('hidden') && !app.classList.contains('focus-mode');
+  if (visible) {
+    const running = mic.meterRunning && mic.isReady;
+    micStatus.classList.toggle('meter-idle', !running);
+    const level = running ? mic.getLevel() : 0;
+    micMeterFill.style.transform = `scaleX(${level.toFixed(3)})`;
+  }
+  requestAnimationFrame(micMeterLoop);
+}
+requestAnimationFrame(micMeterLoop);
 
 // ---------- Device / quality selection ----------
 
@@ -174,6 +296,7 @@ deviceSelect.addEventListener('change', async () => {
   const fps = Number(fpsSelect.value) || 30;
   try {
     await camera.switchDevice(deviceSelect.value, { width: w, height: h, frameRate: fps });
+    probeRecorder();
     populateQualitySelects();
     updateAspectRatio();
     updateDelayBounds();
@@ -188,6 +311,7 @@ async function onQualityChange() {
   const fps = Number(fpsSelect.value) || 30;
   try {
     await camera.applyQuality({ width: w, height: h, frameRate: fps });
+    probeRecorder();
     updateAspectRatio();
     updateDelayBounds();
     delayEngine.prewarm().catch((err) => console.warn('[MotionMirror] prewarm failed', err));
@@ -263,65 +387,65 @@ delaySlider.addEventListener('input', () => {
 // ---------- Recording ----------
 
 const RECORD_LABEL = 'Grabar video y audio';
+let recordingWithAudio = false;
+let takeCounter = 0;
+let pendingItem = null;
 
-recordBtn.addEventListener('click', async () => {
+recordBtn.addEventListener('click', () => {
   if (recorder.isRecording) {
     recorder.stop();
     return;
   }
   if (recorder.isBusy || currentMode !== 'live' || !camera.track) return;
 
-  recordBtn.disabled = true;
-  recordBtn.textContent = 'Preparando…';
-  setControlsDisabled(true);
+  if (mic.isReady) {
+    startRecording(true);
+    return;
+  }
+  // Settle the mic before the take, not after: offer to fix it right here,
+  // or to knowingly record without sound.
+  shareActions.openSheet(MIC_MESSAGES[mic.status] || 'El micrófono no está listo', [
+    {
+      title: 'Conectar micrófono y grabar',
+      detail: 'Se pide acceso al micrófono y la grabación empieza en cuanto esté listo.',
+      run: async () => {
+        if (await connectMic()) startRecording(true);
+        else showToast(micText.textContent, 5000);
+      },
+    },
+    {
+      title: 'Grabar sin audio',
+      detail: 'Solo se grabará la imagen.',
+      run: () => startRecording(false),
+    },
+  ]);
+});
 
-  const audioTrack = await acquireMicrophone();
+function startRecording(withAudio) {
+  if (recorder.isBusy || !camera.track) return;
   const fps = (camera.settings && camera.settings.frameRate) || 30;
+  const audioTrack = withAudio && mic.track ? mic.track.clone() : null;
   try {
-    await recorder.start({
+    recordingWithAudio = !!audioTrack;
+    recorder.start({
       videoTrack: camera.track.clone(),
       audioTrack,
-      meta: { fps },
+      meta: { fps, hasAudio: !!audioTrack },
     });
   } catch (err) {
     console.error('[MotionMirror] recording failed to start', err);
     showToast(`No se pudo iniciar la grabación: ${describeError(err)}`);
     resetRecordUi();
   }
-});
-
-/**
- * Microphone is requested per take (not at camera start) so practicing with
- * the mirror alone never needs the extra permission or leaves the mic
- * indicator on. Browser processing is off by default because noise
- * suppression / echo cancellation / AGC are tuned for speech and audibly
- * mangle music, which is what most practice sessions have playing.
- */
-async function acquireMicrophone() {
-  const processing = audioProcessingToggle.checked;
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: processing,
-        noiseSuppression: processing,
-        autoGainControl: processing,
-      },
-    });
-    return stream.getAudioTracks()[0] || null;
-  } catch (err) {
-    const reason = err && err.name === 'NotAllowedError'
-      ? 'permiso de micrófono denegado'
-      : 'no se pudo acceder al micrófono';
-    showToast(`Grabando solo video (${reason}).`, 5000);
-    return null;
-  }
 }
 
 recorder.addEventListener('start', () => {
+  setControlsDisabled(true);
   recordBtn.disabled = false;
   recordBtn.textContent = 'Detener grabación';
   recordBtn.classList.add('recording');
   recIndicator.classList.remove('hidden');
+  recIndicator.classList.remove('rec-no-audio');
   recordStartedAt = performance.now();
   recTimer.textContent = '00:00';
   recordTimerInterval = setInterval(() => {
@@ -329,22 +453,38 @@ recorder.addEventListener('start', () => {
   }, 250);
 });
 
+// After stopping, the file is rewritten into a proper MP4. Usually that's a
+// sub-second copy, but it can take a while when the browser recorded a
+// format that must be re-encoded (e.g. Firefox), so the take shows up in the
+// list right away as "processing", with its progress.
 recorder.addEventListener('processing', () => {
   recordBtn.disabled = true;
-  recordBtn.textContent = 'Guardando video…';
+  recordBtn.textContent = 'Procesando video…';
   recordBtn.classList.remove('recording');
   recIndicator.classList.add('hidden');
   clearInterval(recordTimerInterval);
+  takeCounter += 1;
+  pendingItem = createPendingItem(takeCounter, (performance.now() - recordStartedAt) / 1000);
+});
+
+recorder.addEventListener('progress', (e) => {
+  if (!pendingItem) return;
+  pendingItem.setProgress(e.detail.progress);
+  recordBtn.textContent = `Procesando video… ${Math.round(e.detail.progress * 100)}%`;
 });
 
 recorder.addEventListener('recording', (e) => {
-  addRecordingToList(e.detail);
+  const li = pendingItem && pendingItem.li;
+  pendingItem = null;
+  addRecordingToList(e.detail, li);
   resetRecordUi();
-  showToast('Grabación guardada. Tócala en la lista para verla.', 2500);
 });
 
 recorder.addEventListener('error', (e) => {
   console.error('[MotionMirror] recording failed', e.detail);
+  if (pendingItem) pendingItem.li.remove();
+  pendingItem = null;
+  updateEmptyState();
   showToast(`La grabación falló: ${describeError(e.detail)}`, 6000);
   resetRecordUi();
 });
@@ -355,8 +495,45 @@ function resetRecordUi() {
   recordBtn.classList.remove('recording');
   recordBtn.disabled = !camera.track;
   recIndicator.classList.add('hidden');
+  recIndicator.classList.remove('rec-no-audio');
   recTimer.textContent = '00:00';
   setControlsDisabled(false);
+}
+
+function createPendingItem(take, seconds) {
+  const li = document.createElement('li');
+  li.className = 'rec-pending';
+  li.dataset.take = String(take);
+  const title = document.createElement('span');
+  title.className = 'rec-title';
+  title.textContent = `Toma ${take} · ${formatMMSS(seconds)}`;
+  const status = document.createElement('span');
+  status.className = 'rec-details';
+  status.textContent = 'Preparando el video…';
+  const bar = document.createElement('div');
+  bar.className = 'progress indeterminate';
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-label', 'Procesando video');
+  bar.setAttribute('aria-valuemin', '0');
+  bar.setAttribute('aria-valuemax', '100');
+  const fill = document.createElement('span');
+  bar.appendChild(fill);
+  li.append(title, status, bar);
+  recordingsList.prepend(li);
+  updateEmptyState();
+  return {
+    li,
+    setProgress(p) {
+      bar.classList.remove('indeterminate');
+      fill.style.transform = `scaleX(${p.toFixed(3)})`;
+      bar.setAttribute('aria-valuenow', String(Math.round(p * 100)));
+      status.textContent = `Preparando el video… ${Math.round(p * 100)}%`;
+    },
+  };
+}
+
+function updateEmptyState() {
+  recordingsEmpty.classList.toggle('hidden', recordingsList.children.length > 0);
 }
 
 function setControlsDisabled(disabled) {
@@ -364,13 +541,14 @@ function setControlsDisabled(disabled) {
   resolutionSelect.disabled = disabled;
   fpsSelect.disabled = disabled;
   audioProcessingToggle.disabled = disabled;
+  micDeviceSelect.disabled = disabled;
+  micConnectBtn.disabled = disabled;
   modeButtons.forEach((b) => { b.disabled = disabled; });
 }
 
-let takeCounter = 0;
-
-function addRecordingToList({ blob, url, durationMs, mimeType, hasAudio, meta }) {
-  takeCounter += 1;
+function addRecordingToList({ blob, url, durationMs, mimeType, meta }, replaceLi = null) {
+  const hasAudio = meta.hasAudio;
+  const take = replaceLi ? Number(replaceLi.dataset.take) : ++takeCounter;
   const ext = fileExtensionFor(mimeType);
   const now = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -389,7 +567,7 @@ function addRecordingToList({ blob, url, durationMs, mimeType, hasAudio, meta })
   openBtn.title = `Ver ${name}`;
   const title = document.createElement('span');
   title.className = 'rec-title';
-  title.textContent = `Toma ${takeCounter} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  title.textContent = `Toma ${take} · ${pad(now.getHours())}:${pad(now.getMinutes())}`;
   const details = document.createElement('span');
   details.className = 'rec-details';
   details.textContent = `${formatMMSS(durationMs / 1000)} · ${formatBytes(blob.size)} · ${ext.toUpperCase()}${hasAudio ? '' : ' · sin audio'}`;
@@ -431,13 +609,14 @@ function addRecordingToList({ blob, url, durationMs, mimeType, hasAudio, meta })
     player.closeIfShowing(url);
     URL.revokeObjectURL(url);
     li.remove();
-    recordingsEmpty.classList.toggle('hidden', recordingsList.children.length > 0);
+    updateEmptyState();
   });
   actions.append(del);
 
   li.append(openBtn, actions);
-  recordingsList.prepend(li);
-  recordingsEmpty.classList.add('hidden');
+  if (replaceLi && replaceLi.isConnected) replaceLi.replaceWith(li);
+  else recordingsList.prepend(li);
+  updateEmptyState();
 }
 
 // ---------- Focus mode ----------
@@ -480,7 +659,8 @@ function updateStats() {
       );
     }
     lines.push(
-      `Grabación: ${recorder.backend ? `${recorder.backend === 'webcodecs' ? 'WebCodecs → MP4' : 'MediaRecorder + remux'} (${recorder.codecs})` : 'aún no usada'}`,
+      `Grabación: MediaRecorder ${recorder.mimeType || 'no soportado'}${recorder.lastFinalize ? ` → MP4 (${recorder.lastFinalize})` : ''}`,
+      `Micrófono: ${mic.status}${mic.label ? ` (${mic.label})` : ''} · medidor ${mic.meterRunning ? 'activo' : 'inactivo'}`,
       `Wake Lock activo: ${wakeLockSentinel ? 'sí' : 'no'}`,
     );
     debugPanel.textContent = lines.join('\n');

@@ -141,30 +141,63 @@ Recording is only offered in the live view; in delay mode the record
 controls are replaced by a note (the delayed view is for watching yourself
 back, not for capturing).
 
-The output is a **non-fragmented MP4 with the `moov` index at the front**
-(H.264 video, AAC audio) — the same shape a phone camera produces. Plain
-`MediaRecorder` output can't be used directly for that: Chrome/Firefox WebM
-has no duration or cues (unseekable in most players, unplayable in iOS
-Photos), and `MediaRecorder` MP4 is fragmented. So `recorder.js` uses
-[Mediabunny](https://mediabunny.dev) (MPL-2.0, vendored in `public/vendor/`
-so the `script-src 'self'` CSP stays intact; loaded on demand):
+### Capture: native MediaRecorder
 
-- **Primary path:** `MediaStreamVideoTrackSource` / `MediaStreamAudioTrackSource`
-  encode the camera and mic tracks with WebCodecs and mux straight into the
-  MP4 (`fastStart: 'in-memory'`). 1 s keyframe interval so scrubbing is
-  precise. If the browser can't encode AAC natively (e.g. Firefox), a WASM
-  AAC encoder (`@mediabunny/aac-encoder`) is loaded instead.
-- **Fallback** (no WebCodecs H.264/HEVC encoder): `MediaRecorder`, then a
-  Mediabunny remux pass that writes a proper MP4 (or a cued WebM if the
-  codecs don't fit MP4). The original file is kept if that fails, so a take
-  is never lost.
+Capture uses the browser's own `MediaRecorder` on the camera + mic tracks.
+It's the one recording API every engine (Chrome, Firefox, Safari/iOS)
+implements, and it captures and syncs audio internally. An earlier version
+encoded the tracks with WebCodecs via Mediabunny's MediaStream sources; that
+silently lost the audio on iPhone and Firefox, because reading mic samples
+there needs an `AudioContext` that iOS keeps suspended unless it's started
+inside the user's tap (Chrome-only `MediaStreamTrackProcessor` handles audio
+on the main thread; the standard one is video-only).
 
-The microphone is requested per take, not at camera start, so using the
-mirror alone never asks for it. Browser audio processing (noise suppression,
-echo cancellation, AGC) is **off by default** because it's tuned for speech
-and mangles music; a checkbox turns it on. If mic access is denied the take
-is recorded video-only, with a toast. The on-screen mirror flip does not
-affect recordings (the player has its own mirror toggle).
+Which container/codec combo works is device-specific and
+`MediaRecorder.isTypeSupported()` can't tell: e.g. Chrome's MP4/AAC encoder
+rejects 16 kHz microphones (common on webcams) at runtime. So:
+
+- `RecordingController.probe()` makes a ~0.8 s throwaway recording with the
+  real tracks in the background whenever the camera or mic changes, and
+  remembers the first format that produced data without an error
+  (preference: MP4 H.264+AAC → MP4 H.264+Opus → MP4 → WebM H.264/VP9/VP8).
+- If the encoder still fails within the first seconds of a take, the
+  recorder silently restarts on the next format.
+
+### Finalize: a real MP4
+
+Raw MediaRecorder output isn't good enough to hand out: WebM has no
+duration or cues (unseekable, unplayable in iOS Photos) and MediaRecorder
+MP4 is fragmented. On stop, [Mediabunny](https://mediabunny.dev) (MPL-2.0,
+vendored in `public/vendor/` so the `script-src 'self'` CSP stays intact;
+loaded on demand) rewrites it into a **non-fragmented MP4 with the `moov`
+index at the front** (H.264 + AAC-LC), the shape a phone camera produces:
+
+- H.264/AAC tracks are copied untouched (near-instant).
+- Opus is transcoded to AAC 48 kHz (quick); VP8/VP9 to H.264 (slower,
+  Firefox). If WebCodecs can't encode AAC, a WASM AAC encoder
+  (`@mediabunny/aac-encoder`) is loaded.
+- The take appears in the list immediately as "Preparando el video…" with a
+  progress bar (and the record button shows the percentage), since a
+  transcode can take a while.
+- Fallbacks: a cued WebM, then the raw file — a take is never lost.
+
+### Microphone: confirmed before recording, not after
+
+- Camera and mic are requested in **one** `getUserMedia` call when the
+  camera is activated (one permission prompt). If the mic part fails, the
+  camera opens alone and the mic panel says why.
+- `mic.js` shows a live level meter (`AnalyserNode`; its `AudioContext` is
+  created inside the activation tap so iOS lets it run) plus the mic's name
+  and a device picker when there are several.
+- Track `mute`/`ended` (another app took the mic, unplugged, revoked) shows
+  up immediately, including on the REC badge mid-take.
+- Pressing record with no working mic opens a sheet: "Conectar micrófono y
+  grabar" or, knowingly, "Grabar sin audio".
+
+Browser audio processing (noise suppression, echo cancellation, AGC) is
+**off by default** because it's tuned for speech and mangles music; a
+checkbox turns it on. The on-screen mirror flip does not affect recordings
+(the player has its own mirror toggle).
 
 Recordings live in memory for the session (blob URLs); nothing is written to
 disk until you download or share one. They are lost on reload.
